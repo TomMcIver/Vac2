@@ -1,6 +1,7 @@
+import os
+import platform
 import time
 import base64
-import os
 from datetime import datetime
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -11,157 +12,89 @@ from pymongo import MongoClient
 
 # === CONFIG ===
 BASE_URL = "https://www.harveynorman.co.nz/home-appliances/vacuums-and-floor-care"
-CHROMEDRIVER_PATH = r"C:\\WebDriver\\bin\\chromedriver.exe"
 MONGO_URI = "mongodb+srv://tommc9010:sG0Y9G2Zu7Jsy7@cluster0.gz9xv3d.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 DB_NAME = "vacdirect"
 COLLECTION_NAME = "harvey_products"
 
-def get_page_source(url, delay=8):
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36"
+}
 
-    service = Service(CHROMEDRIVER_PATH)
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(180)
-
-    products = []
-    html = ""
-    is_404 = False
-
+def get_chromedriver():
     try:
-        driver.get(url)
-        time.sleep(delay)
-        html = driver.page_source
+        return webdriver.Chrome  # Selenium 4.6+ autodetects
+    except Exception:
+        system = platform.system()
+        if system == "Linux":
+            return lambda **kwargs: webdriver.Chrome(service=Service("/usr/bin/chromedriver"), **kwargs)
+        elif system == "Windows":
+            return lambda **kwargs: webdriver.Chrome(service=Service("C:\\WebDriver\\bin\\chromedriver.exe"), **kwargs)
+        else:
+            raise RuntimeError("Unsupported OS or missing ChromeDriver")
 
-        page_title = driver.title
-        if "can't find" in page_title.lower() or "404" in page_title:
-            is_404 = True
-            return html, products, is_404
-
-        if "Oops! We can't find that page" in html or "Sorry, we couldn't find the page" in html:
-            is_404 = True
-            return html, products, is_404
-
-        product_elements = driver.find_elements(By.CSS_SELECTOR, "[data-product-id][data-product-price]")
-
-        if not product_elements:
-            product_elements = driver.find_elements(By.CSS_SELECTOR, "[data-product-id][data-product-name]")
-
-        processed_ids = set()
-
-        for element in product_elements:
-            try:
-                product_id = element.get_attribute('data-product-id')
-                if product_id in processed_ids:
-                    continue
-                processed_ids.add(product_id)
-
-                product_name = element.get_attribute('data-product-name')
-                if product_name and ';' not in product_name and '&' not in product_name:
-                    try:
-                        decoded_name = base64.b64decode(product_name).decode('utf-8')
-                        if decoded_name and len(decoded_name) > 5:
-                            product_name = decoded_name
-                    except:
-                        pass
-
-                product_price = element.get_attribute('data-product-price')
-                if product_price:
-                    if product_price.replace(".", "", 1).isdigit():
-                        product_price = f"${product_price}"
-
-                if product_name and product_price:
-                    products.append({"model": product_name, "price": product_price})
-            except:
-                continue
-
-        if not products:
-            products = extract_from_html(html)
-
-    except Exception as e:
-        print(f"Error during page processing: {e}")
-    finally:
-        driver.quit()
-
-    return html, products, is_404
-
-def extract_from_html(html):
-    soup = BeautifulSoup(html, 'html.parser')
+def extract_products_from_page(html):
+    soup = BeautifulSoup(html, "html.parser")
     products = []
-    product_elements = soup.select('[data-product-id][data-product-price]')
-    if not product_elements:
-        product_elements = soup.select('[data-product-id][data-product-name]')
+    product_elements = soup.select("[data-product-id][data-product-name][data-product-price]")
 
-    processed_ids = set()
-
-    for element in product_elements:
-        try:
-            product_id = element.get('data-product-id')
-            if product_id in processed_ids:
-                continue
-            processed_ids.add(product_id)
-
-            product_name = element.get('data-product-name', '')
-            product_price = element.get('data-product-price', '')
-
-            if product_name and ';' not in product_name and '&' not in product_name:
-                try:
-                    decoded_name = base64.b64decode(product_name).decode('utf-8')
-                    if decoded_name and len(decoded_name) > 5:
-                        product_name = decoded_name
-                except:
-                    pass
-
-            if product_price and product_price.replace(".", "", 1).isdigit():
-                product_price = f"${product_price}"
-
-            if product_name and product_price:
-                products.append({"model": product_name, "price": product_price})
-        except:
-            continue
-
+    for el in product_elements:
+        name = el.get("data-product-name", "").strip()
+        price = el.get("data-product-price", "").strip()
+        if name and price:
+            products.append({
+                "model": name,
+                "price": f"${price}" if not price.startswith("$") else price
+            })
     return products
 
-def run_pipeline():
-    print("\n=== Starting Harvey Norman Scraper with MongoDB Atlas Output ===\n")
+def scrape_all_pages():
     all_products = []
-    page_num = 1
+    page = 1
+
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+
+    ChromeDriver = get_chromedriver()
+    driver = ChromeDriver(options=chrome_options)
 
     while True:
-        if page_num == 1:
-            current_url = BASE_URL + "/"
-        else:
-            current_url = f"{BASE_URL}/page-{page_num}/"
+        url = f"{BASE_URL}/page-{page}/" if page > 1 else BASE_URL
+        print(f"Scraping {url}")
+        driver.get(url)
+        time.sleep(2)
 
-        html, page_products, is_404 = get_page_source(current_url)
-
-        if is_404:
+        products = extract_products_from_page(driver.page_source)
+        if not products:
+            print("No products found. Ending scrape.")
             break
 
-        print(f"Page {page_num}: Found {len(page_products)} products")
-        all_products.extend(page_products)
-        page_num += 1
-        time.sleep(1)
+        print(f"Page {page}: Found {len(products)} products")
+        all_products.extend(products)
+        page += 1
 
-    if not all_products:
-        print("No products scraped. Aborting DB insert.")
-        return
+    driver.quit()
+    return all_products
 
+def save_to_mongo(data):
     try:
         client = MongoClient(MONGO_URI)
         db = client[DB_NAME]
         collection = db[COLLECTION_NAME]
 
         collection.delete_many({})
-        collection.insert_many(all_products)
-
-        print(f"Inserted {len(all_products)} products into MongoDB Atlas.")
+        collection.insert_many(data)
+        print(f"Inserted {len(data)} products into MongoDB Atlas.")
     except Exception as e:
         print(f"MongoDB Error: {e}")
 
+def run():
+    print("\n=== Starting Harvey Norman Scraper with MongoDB Atlas Output ===\n")
+    products = scrape_all_pages()
+    if products:
+        save_to_mongo(products)
+
 if __name__ == "__main__":
-    run_pipeline()
+    run()
