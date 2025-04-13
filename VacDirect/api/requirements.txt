@@ -1,0 +1,26 @@
+# Core scraping & automation
+selenium
+beautifulsoup4
+lxml
+
+# CSV processing and date formatting
+python-dateutil
+
+# Optional for base64 decoding (comes with Python stdlib)
+
+# API backend
+fastapi
+uvicorn
+
+# CORS for frontend access
+python-multipart
+aiofiles
+jinja2
+pydantic
+requests
+
+# If you want MongoDB storage
+pymongo
+
+# If using dotenv configs later
+python-dotenv
