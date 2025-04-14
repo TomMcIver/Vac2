@@ -1,15 +1,15 @@
-import requests
+import json
 from bs4 import BeautifulSoup
 from datetime import datetime
-import json
-import os
-import time
-import urllib3
-import pymongo
 from pymongo import MongoClient
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+import platform
+import ssl
+import time
 import certifi
 import socket
-import ssl
 
 # === CONFIG ===
 BASE_URL = "https://www.harveynorman.co.nz/home-appliances/vacuums-and-floor-care"
@@ -18,21 +18,38 @@ DB_NAME = "vacdirect"
 COLLECTION_NAME = "harvey_products"
 BACKUP_FILE = "harvey_products.json"
 MAX_RETRIES = 3
-DELAY_BETWEEN_REQUESTS = 2  # seconds
+DELAY_BETWEEN_REQUESTS = 1  # seconds
 
-# Configure requests with a longer timeout and retry strategy
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Cache-Control": "max-age=0"
-})
-
-# Disable SSL warnings for requests
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def create_driver():
+    """Create a headless Chrome driver with proper settings"""
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    # Set page load timeout
+    chrome_options.add_argument("--page-load-strategy=none")
+    
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.set_page_load_timeout(30)  # 30 second timeout
+        return driver
+    except Exception as e:
+        print(f"Auto-detection failed, falling back to platform-specific path: {str(e)}")
+    
+    system = platform.system()
+    if system == "Linux":
+        driver = webdriver.Chrome(service=Service("/usr/bin/chromedriver"), options=chrome_options)
+        driver.set_page_load_timeout(30)
+        return driver
+    elif system == "Windows":
+        driver = webdriver.Chrome(service=Service("C:\\WebDriver\\bin\\chromedriver.exe"), options=chrome_options)
+        driver.set_page_load_timeout(30)
+        return driver
+    else:
+        raise EnvironmentError("Unsupported OS or ChromeDriver not found")
 
 def extract_products_from_page(html):
     """Extract product information from a page's HTML"""
@@ -57,21 +74,34 @@ def extract_products_from_page(html):
     return products
 
 def scrape_page(page_num, max_retries=MAX_RETRIES):
-    """Scrape a single page with retries"""
+    """Scrape a single page with retries using Selenium"""
     url = f"{BASE_URL}/page-{page_num}/" if page_num > 1 else BASE_URL
     print(f"Scraping {url}")
     
     for attempt in range(max_retries):
         try:
-            response = session.get(url, timeout=30)
-            if response.status_code == 200:
-                products = extract_products_from_page(response.text)
-                print(f"Page {page_num}: Found {len(products)} products")
-                return products
-            else:
-                print(f"Error: HTTP status {response.status_code} for page {page_num}")
+            driver = create_driver()
+            driver.get(url)
+            
+            # Wait for content to load
+            time.sleep(3)
+            
+            html = driver.page_source
+            driver.quit()
+            
+            products = extract_products_from_page(html)
+            print(f"Page {page_num}: Found {len(products)} products")
+            return products
+            
         except Exception as e:
             print(f"Attempt {attempt+1}/{max_retries} failed for page {page_num}: {str(e)}")
+            
+            # Close driver if it's still open
+            try:
+                driver.quit()
+            except:
+                pass
+                
             if attempt < max_retries - 1:
                 wait_time = (attempt + 1) * DELAY_BETWEEN_REQUESTS
                 print(f"Waiting {wait_time} seconds before retrying...")
@@ -113,39 +143,8 @@ def save_to_file(data, filename=BACKUP_FILE):
         print(f"Error saving to file: {str(e)}")
         return False
 
-def check_mongodb_connectivity():
-    """Test MongoDB connection using multiple methods"""
-    print("Testing MongoDB connectivity...")
-    
-    # Method 1: Try basic socket connection
-    try:
-        for host in ["ac-uguwq3v-shard-00-00.gz9xv3d.mongodb.net", 
-                    "ac-uguwq3v-shard-00-01.gz9xv3d.mongodb.net", 
-                    "ac-uguwq3v-shard-00-02.gz9xv3d.mongodb.net"]:
-            sock = socket.create_connection((host, 27017), timeout=5)
-            print(f"Socket connection to {host}:27017 successful")
-            sock.close()
-    except Exception as e:
-        print(f"Socket connection failed: {str(e)}")
-    
-    # Method 2: Try PyMongo's connection with client.server_info()
-    try:
-        ssl._create_default_https_context = ssl._create_unverified_context
-        client = MongoClient(
-            MONGO_URI,
-            serverSelectionTimeoutMS=5000,
-            ssl=True,
-            ssl_cert_reqs=ssl.CERT_NONE  # Disable certificate verification
-        )
-        info = client.server_info()
-        print(f"MongoDB connection successful. Server info: {info}")
-        return True
-    except Exception as e:
-        print(f"PyMongo connection test failed: {str(e)}")
-        return False
-
 def save_to_mongo(data):
-    """Try to save data to MongoDB with several fallback methods"""
+    """Save data to MongoDB with multiple fallback strategies"""
     if not data:
         print("No data to save to MongoDB")
         return False
@@ -153,19 +152,17 @@ def save_to_mongo(data):
     # First save to file as backup
     save_to_file(data)
     
-    # Check connectivity first
-    connectivity = check_mongodb_connectivity()
-    if not connectivity:
-        print("MongoDB connectivity check failed, attempting save anyway...")
-    
     # Try multiple connection methods
     connection_methods = [
-        # Method 1: Standard connection with certifi
+        # Method 1: Using dns_seedlist (recommended approach from MongoDB)
         {
-            "name": "Standard with certifi",
+            "name": "DNS Seedlist Connection",
             "params": {
-                "tls": True,
-                "tlsCAFile": certifi.where(),
+                "ssl": True, 
+                "ssl_ca_certs": certifi.where(),
+                "retryWrites": True,
+                "w": "majority",
+                "directConnection": False,
             }
         },
         # Method 2: Disable certificate validation
@@ -176,18 +173,14 @@ def save_to_mongo(data):
                 "ssl_cert_reqs": ssl.CERT_NONE
             }
         },
-        # Method 3: Unverified context with tlsInsecure
+        # Method 3: Direct connection
         {
-            "name": "tlsInsecure mode",
+            "name": "Direct Connection",
             "params": {
-                "tlsInsecure": True
+                "directConnection": True,
+                "ssl": True,
+                "ssl_cert_reqs": ssl.CERT_NONE
             }
-        },
-        # Method 4: Direct connection string modification
-        {
-            "name": "Modified connection string",
-            "params": {},
-            "uri_suffix": "&ssl=true&tlsInsecure=true"
         }
     ]
     
@@ -195,14 +188,9 @@ def save_to_mongo(data):
         try:
             print(f"Trying MongoDB connection method: {method['name']}")
             
-            # Modify URI if needed
-            uri = MONGO_URI
-            if 'uri_suffix' in method:
-                uri = f"{MONGO_URI}{method['uri_suffix']}"
-            
             # Set up client with timeout
             client = MongoClient(
-                uri,
+                MONGO_URI,
                 serverSelectionTimeoutMS=10000,
                 **method['params']
             )
