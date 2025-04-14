@@ -84,7 +84,6 @@ def save_to_mongo(data):
             tls=True,
             tlsAllowInvalidCertificates=True,
             tlsAllowInvalidHostnames=True,
-            tlsInsecure=True,
             tlsCAFile="/etc/ssl/certs/ca-certificates.crt",
             serverSelectionTimeoutMS=30000
         )
