@@ -17,17 +17,20 @@ DB_NAME = "vacdirect"
 COLLECTION_NAME = "harvey_products"
 
 def get_chrome_driver():
+    """
+    Try using Selenium's auto-detection first; if that fails, fall back to OS-specific paths.
+    """
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--headless=new")  # modern headless mode
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-
+    
     try:
-        # Try auto-detection (Selenium >= 4.6.0)
+        # Try Selenium auto-detection
         return webdriver.Chrome(options=chrome_options)
-    except Exception:
-        # Fallbacks for specific OS paths
+    except Exception as e:
+        print("Auto-detection failed, falling back to OS-specific driver paths...")
         system = platform.system()
         if system == "Linux":
             return webdriver.Chrome(service=Service("/usr/bin/chromedriver"), options=chrome_options)
@@ -37,10 +40,14 @@ def get_chrome_driver():
             raise EnvironmentError("Unsupported OS or ChromeDriver path not found.")
 
 def get_page_source(url, delay=8):
+    """
+    Opens the URL using Selenium, waits for it to load, extracts HTML and product data.
+    Returns (html, products, is_404)
+    """
     print(f"Opening {url}...")
     driver = get_chrome_driver()
     driver.set_page_load_timeout(180)
-
+    
     products = []
     html = ""
     is_404 = False
@@ -51,6 +58,7 @@ def get_page_source(url, delay=8):
         time.sleep(delay)
         html = driver.page_source
 
+        # Check for a 404 using page title or content cues
         page_title = driver.title
         if "can't find" in page_title.lower() or "404" in page_title:
             print(f"Detected 404 page: {page_title}")
@@ -63,12 +71,12 @@ def get_page_source(url, delay=8):
             return html, products, is_404
 
         print("Extracting product data from attributes...")
+        # Attempt to find product elements using data attributes
         product_elements = driver.find_elements(By.CSS_SELECTOR, "[data-product-id][data-product-price]")
-
         if not product_elements:
             print("No product elements with price attributes found, trying alternative selectors...")
             product_elements = driver.find_elements(By.CSS_SELECTOR, "[data-product-id][data-product-name]")
-
+        
         print(f"Found {len(product_elements)} product elements with required attributes")
         processed_ids = set()
 
@@ -80,12 +88,13 @@ def get_page_source(url, delay=8):
                 processed_ids.add(product_id)
 
                 product_name = element.get_attribute('data-product-name')
+                # Try decoding if the name appears to be base64-encoded
                 if product_name and product_name.strip() and ';' not in product_name and '&' not in product_name:
                     try:
                         decoded_name = base64.b64decode(product_name).decode('utf-8')
                         if decoded_name and len(decoded_name) > 5:
                             product_name = decoded_name
-                    except:
+                    except Exception as e:
                         pass
 
                 product_price = element.get_attribute('data-product-price')
@@ -105,47 +114,10 @@ def get_page_source(url, delay=8):
 
     return html, products, is_404
 
-def extract_from_html(html):
-    print("Extracting products from HTML data attributes...")
-    soup = BeautifulSoup(html, 'html.parser')
-    products = []
-    product_elements = soup.select('[data-product-id][data-product-price]')
-    if not product_elements:
-        product_elements = soup.select('[data-product-id][data-product-name]')
-
-    print(f"Found {len(product_elements)} product elements in HTML")
-    processed_ids = set()
-
-    for element in product_elements:
-        try:
-            product_id = element.get('data-product-id')
-            if product_id in processed_ids:
-                continue
-            processed_ids.add(product_id)
-
-            product_name = element.get('data-product-name', '')
-            product_price = element.get('data-product-price', '')
-
-            if product_name and ';' not in product_name and '&' not in product_name:
-                try:
-                    decoded_name = base64.b64decode(product_name).decode('utf-8')
-                    if decoded_name and len(decoded_name) > 5:
-                        product_name = decoded_name
-                except:
-                    pass
-
-            if product_price and (product_price.replace('.', '', 1).isdigit() and product_price.count('.') <= 1):
-                product_price = f"${product_price}"
-
-            if product_name and product_price:
-                products.append({"model": product_name, "price": product_price})
-                print(f"Extracted from HTML: {product_name} - {product_price}")
-        except Exception as e:
-            print(f"Error processing HTML element: {e}")
-
-    return products
-
 def save_to_mongo(data):
+    """
+    Connects to MongoDB Atlas, clears the target collection, and inserts the new product data.
+    """
     try:
         client = MongoClient(MONGO_URI)
         db = client[DB_NAME]
@@ -157,6 +129,9 @@ def save_to_mongo(data):
         print(f"MongoDB Error: {e}")
 
 def run_pipeline():
+    """
+    Runs the scraper, paginates through pages until no more products are found, and saves data to MongoDB.
+    """
     print("\n=== Starting Harvey Norman Scraper with MongoDB Atlas Output ===\n")
     all_products = []
     page_num = 1
