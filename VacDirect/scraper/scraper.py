@@ -81,9 +81,12 @@ def save_to_mongo(data):
     try:
         client = MongoClient(
             MONGO_URI,
-            ssl=True,
-            ssl_cert_reqs=ssl.CERT_NONE,
-            ssl_version=ssl.PROTOCOL_TLSv1_2
+            tls=True,
+            tlsAllowInvalidCertificates=True,
+            tlsAllowInvalidHostnames=True,
+            tlsInsecure=True,
+            tlsCAFile="/etc/ssl/certs/ca-certificates.crt",
+            serverSelectionTimeoutMS=30000
         )
         db = client[DB_NAME]
         collection = db[COLLECTION_NAME]
