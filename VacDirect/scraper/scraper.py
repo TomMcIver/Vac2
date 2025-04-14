@@ -7,6 +7,8 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from pymongo import MongoClient
 import platform
 
@@ -18,7 +20,8 @@ COLLECTION_NAME = "harvey_products"
 
 def get_chrome_driver():
     """
-    Try using Selenium's auto-detection first; if that fails, fall back to OS-specific paths.
+    Initialize a headless Selenium Chrome driver.
+    Tries auto-detection, then falls back to OS-specific paths.
     """
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")  # modern headless mode
@@ -27,7 +30,7 @@ def get_chrome_driver():
     chrome_options.add_argument("--disable-gpu")
     
     try:
-        # Try Selenium auto-detection
+        # Auto-detection: works with newer Selenium versions.
         return webdriver.Chrome(options=chrome_options)
     except Exception as e:
         print("Auto-detection failed, falling back to OS-specific driver paths...")
@@ -41,8 +44,8 @@ def get_chrome_driver():
 
 def get_page_source(url, delay=8):
     """
-    Opens the URL using Selenium, waits for it to load, extracts HTML and product data.
-    Returns (html, products, is_404)
+    Opens the URL using Selenium and explicitly waits for dynamic content.
+    Returns: (html, products, is_404)
     """
     print(f"Opening {url}...")
     driver = get_chrome_driver()
@@ -54,11 +57,22 @@ def get_page_source(url, delay=8):
 
     try:
         driver.get(url)
-        print("Waiting for page to load...")
-        time.sleep(delay)
+
+        # Use explicit wait to allow JavaScript to load product elements.
+        try:
+            # Wait up to 30 seconds for an element with the attribute 'data-product-id' to appear.
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-product-id]"))
+            )
+        except Exception:
+            print("Timed out waiting for product elements; proceeding anyway.")
+
+        print("Waiting a few extra seconds to ensure full rendering...")
+        time.sleep(delay)  # Additional wait to be safe
+
         html = driver.page_source
 
-        # Check for a 404 using page title or content cues
+        # Check for 404 cues.
         page_title = driver.title
         if "can't find" in page_title.lower() or "404" in page_title:
             print(f"Detected 404 page: {page_title}")
@@ -70,13 +84,13 @@ def get_page_source(url, delay=8):
             is_404 = True
             return html, products, is_404
 
-        print("Extracting product data from attributes...")
-        # Attempt to find product elements using data attributes
+        print("Extracting product data from attributes using Selenium...")
+        # Try to locate product elements using data attributes.
         product_elements = driver.find_elements(By.CSS_SELECTOR, "[data-product-id][data-product-price]")
         if not product_elements:
-            print("No product elements with price attributes found, trying alternative selectors...")
+            print("No product elements with price attributes found, trying alternative selector...")
             product_elements = driver.find_elements(By.CSS_SELECTOR, "[data-product-id][data-product-name]")
-        
+
         print(f"Found {len(product_elements)} product elements with required attributes")
         processed_ids = set()
 
@@ -88,13 +102,12 @@ def get_page_source(url, delay=8):
                 processed_ids.add(product_id)
 
                 product_name = element.get_attribute('data-product-name')
-                # Try decoding if the name appears to be base64-encoded
                 if product_name and product_name.strip() and ';' not in product_name and '&' not in product_name:
                     try:
                         decoded_name = base64.b64decode(product_name).decode('utf-8')
                         if decoded_name and len(decoded_name) > 5:
                             product_name = decoded_name
-                    except Exception as e:
+                    except Exception:
                         pass
 
                 product_price = element.get_attribute('data-product-price')
@@ -114,9 +127,52 @@ def get_page_source(url, delay=8):
 
     return html, products, is_404
 
+def extract_from_html(html):
+    """
+    Fallback: Extract product data from HTML using BeautifulSoup.
+    """
+    print("Extracting products from HTML fallback...")
+    soup = BeautifulSoup(html, 'html.parser')
+    products = []
+    product_elements = soup.select('[data-product-id][data-product-price]')
+    if not product_elements:
+        product_elements = soup.select('[data-product-id][data-product-name]')
+
+    print(f"Found {len(product_elements)} product elements in HTML")
+    processed_ids = set()
+
+    for element in product_elements:
+        try:
+            product_id = element.get('data-product-id')
+            if product_id in processed_ids:
+                continue
+            processed_ids.add(product_id)
+
+            product_name = element.get('data-product-name', '')
+            product_price = element.get('data-product-price', '')
+
+            if product_name and ';' not in product_name and '&' not in product_name:
+                try:
+                    decoded_name = base64.b64decode(product_name).decode('utf-8')
+                    if decoded_name and len(decoded_name) > 5:
+                        product_name = decoded_name
+                except Exception:
+                    pass
+
+            if product_price and (product_price.replace('.', '', 1).isdigit() and product_price.count('.') <= 1):
+                product_price = f"${product_price}"
+
+            if product_name and product_price:
+                products.append({"model": product_name, "price": product_price})
+                print(f"Extracted from HTML: {product_name} - {product_price}")
+        except Exception as e:
+            print(f"Error processing HTML element: {e}")
+
+    return products
+
 def save_to_mongo(data):
     """
-    Connects to MongoDB Atlas, clears the target collection, and inserts the new product data.
+    Connects to MongoDB Atlas, clears the target collection, and inserts new product data.
     """
     try:
         client = MongoClient(MONGO_URI)
@@ -130,7 +186,8 @@ def save_to_mongo(data):
 
 def run_pipeline():
     """
-    Runs the scraper, paginates through pages until no more products are found, and saves data to MongoDB.
+    Paginates through the Harvey Norman product pages using Selenium,
+    extracts product data, and saves them to MongoDB Atlas.
     """
     print("\n=== Starting Harvey Norman Scraper with MongoDB Atlas Output ===\n")
     all_products = []
