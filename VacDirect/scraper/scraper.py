@@ -1,6 +1,13 @@
-import requests
-from bs4 import BeautifulSoup
+import os
+import platform
+import time
+import base64
 from datetime import datetime
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 from pymongo import MongoClient
 
 # === CONFIG ===
@@ -12,6 +19,18 @@ COLLECTION_NAME = "harvey_products"
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36"
 }
+
+def get_chromedriver():
+    try:
+        return webdriver.Chrome  # Selenium 4.6+ autodetects
+    except Exception:
+        system = platform.system()
+        if system == "Linux":
+            return lambda **kwargs: webdriver.Chrome(service=Service("/usr/bin/chromedriver"), **kwargs)
+        elif system == "Windows":
+            return lambda **kwargs: webdriver.Chrome(service=Service("C:\\WebDriver\\bin\\chromedriver.exe"), **kwargs)
+        else:
+            raise RuntimeError("Unsupported OS or missing ChromeDriver")
 
 def extract_products_from_page(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -32,16 +51,22 @@ def scrape_all_pages():
     all_products = []
     page = 1
 
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+
+    ChromeDriver = get_chromedriver()
+    driver = ChromeDriver(options=chrome_options)
+
     while True:
         url = f"{BASE_URL}/page-{page}/" if page > 1 else BASE_URL
         print(f"Scraping {url}")
-        response = requests.get(url, headers=headers)
+        driver.get(url)
+        time.sleep(2)
 
-        if response.status_code != 200:
-            print("No more pages or error occurred.")
-            break
-
-        products = extract_products_from_page(response.text)
+        products = extract_products_from_page(driver.page_source)
         if not products:
             print("No products found. Ending scrape.")
             break
@@ -50,6 +75,7 @@ def scrape_all_pages():
         all_products.extend(products)
         page += 1
 
+    driver.quit()
     return all_products
 
 def save_to_mongo(data):
@@ -65,6 +91,7 @@ def save_to_mongo(data):
         print(f"MongoDB Error: {e}")
 
 def run():
+    print("\n=== Starting Harvey Norman Scraper with MongoDB Atlas Output ===\n")
     products = scrape_all_pages()
     if products:
         save_to_mongo(products)
