@@ -2,12 +2,6 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 from pymongo import MongoClient
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-import platform
-import ssl
 
 # === CONFIG ===
 BASE_URL = "https://www.harveynorman.co.nz/home-appliances/vacuums-and-floor-care"
@@ -18,26 +12,6 @@ COLLECTION_NAME = "harvey_products"
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36"
 }
-
-def create_driver():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-
-    try:
-        return webdriver.Chrome(options=chrome_options)
-    except Exception as e:
-        print("Auto-detection failed, falling back to platform-specific path")
-
-    system = platform.system()
-    if system == "Linux":
-        return webdriver.Chrome(service=Service("/usr/bin/chromedriver"), options=chrome_options)
-    elif system == "Windows":
-        return webdriver.Chrome(service=Service("C:\\WebDriver\\bin\\chromedriver.exe"), options=chrome_options)
-    else:
-        raise EnvironmentError("Unsupported OS or ChromeDriver not found")
 
 def extract_products_from_page(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -61,12 +35,13 @@ def scrape_all_pages():
     while True:
         url = f"{BASE_URL}/page-{page}/" if page > 1 else BASE_URL
         print(f"Scraping {url}")
-        driver = create_driver()
-        driver.get(url)
-        html = driver.page_source
-        driver.quit()
+        response = requests.get(url, headers=headers)
 
-        products = extract_products_from_page(html)
+        if response.status_code != 200:
+            print("No more pages or error occurred.")
+            break
+
+        products = extract_products_from_page(response.text)
         if not products:
             print("No products found. Ending scrape.")
             break
@@ -79,15 +54,7 @@ def scrape_all_pages():
 
 def save_to_mongo(data):
     try:
-        client = MongoClient(
-            MONGO_URI,
-            tls=True,
-            tlsAllowInvalidCertificates=True,
-            tlsAllowInvalidHostnames=True,
-            tlsInsecure=True,
-            tlsCAFile="/etc/ssl/certs/ca-certificates.crt",
-            serverSelectionTimeoutMS=30000
-        )
+        client = MongoClient(MONGO_URI)
         db = client[DB_NAME]
         collection = db[COLLECTION_NAME]
 
@@ -98,7 +65,6 @@ def save_to_mongo(data):
         print(f"MongoDB Error: {e}")
 
 def run():
-    print("\n=== Starting Harvey Norman Scraper with MongoDB Atlas Output ===\n")
     products = scrape_all_pages()
     if products:
         save_to_mongo(products)
